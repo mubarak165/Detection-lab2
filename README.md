@@ -11,6 +11,16 @@
 - Validate the full pipeline end-to-end — attack simulated, detected, and automatically responded to, with no manual steps
 - Troubleshoot real infrastructure issues as they came up — a misconfigured modular alert action, a legacy vs. JSON payload mismatch, and a broken default route causing silent email failures — rather than following a scripted walkthrough
 
+## Relationship to Base Lab
+This project builds directly on top of my earlier [Home SOC Lab: AD + Sysmon + Splunk Detection Pipeline](https://github.com/mubarak165/Detection-lab). The Active Directory domain, Sysmon telemetry, Splunk Universal Forwarder setup, and the brute-force detection alert (Event ID 4625) were all built and validated in that project and are not re-documented here. This project picks up right after detection was already working, and focuses entirely on turning that detection into an automated response.
+
+## What's New in This Project
+- pfSense added to the lab topology as the firewall/gateway, with REST API access enabled for programmatic rule creation
+- Custom Splunk app (`pfsense_blocker`) built to automate incident response
+- Two actions now fire simultaneously the moment the existing brute-force alert triggers:
+  - **Email notification** sent to the admin
+  - **Automatic firewall rule** created on pfSense to block the attacker's IP
+    
 ## Architecture / Lab Environment
 This project extends the base lab by adding a pfSense firewall as the network gateway, splitting the environment into segmented VMnets, and integrating pfSense's REST API with Splunk to enable automated attacker IP blocking.
 
@@ -29,3 +39,20 @@ This project extends the base lab by adding a pfSense firewall as the network ga
 - Windows 10 (domain-joined client, target of brute-force attack)
 - Kali Linux + Crowbar (attack simulation)
 - Python 3 (custom alert action scripts: `alert_actions.py`, `block_ip.py`)
+
+## Build Process — Automated Response Pipeline
+
+### 6.1 pfSense Setup (LAN/WAN Config, REST API Access)
+pfSense was deployed as the firewall/gateway for the lab, sitting between the router/internet connection and two segmented internal networks (VMnet1 for the Splunk server and Windows client, VMnet2 for the isolated attacker machine).
+
+- Configured the **WAN interface** to receive the upstream connection from the router
+- Configured the **LAN interface** (`192.168.174.1`) to serve as the default gateway for both internal VMnets
+- Enabled the **pfSense REST API** package to allow programmatic firewall rule creation from external scripts
+- Generated an API key/credentials to authenticate requests from the Splunk server to pfSense
+- Verified manually that a firewall block rule could be created via a direct API call before wiring it into any automation
+
+<img width="600" alt="pfSense LAN/WAN interface configuration" src="PASTE_IMAGE_URL_HERE" />
+<img width="600" alt="pfSense REST API access/credentials setup" src="PASTE_IMAGE_URL_HERE" />
+
+### 6.2 Custom Splunk App Structure (`pfsense_blocker`)
+Built a custom Splunk app to house the automated response logic, following Splunk's app directory structure:
