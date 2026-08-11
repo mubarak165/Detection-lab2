@@ -122,3 +122,91 @@ if __name__ == "__main__":
 ```
 
 **`block_ip.py`** — takes the attacker's IP as a command-line argument and sends an authenticated POST request to the pfSense REST API, creating a new firewall block rule on the LAN interface for that IP. Authentication is handled via an API key stored in the script (excluded from this repo for security).
+
+## Troubleshooting
+
+This section documents the two major issues that blocked the automation from working, and how each was diagnosed and resolved. Both failures were silent — the pipeline appeared to run (trigger history recorded executions, alerts fired) without any obvious error pointing to the actual cause.
+
+### 7.1 Automatic IP Blocking Wasn't Firing
+
+**Symptom:**
+The Splunk alert triggered correctly, and trigger history confirmed executions — but the pfSense firewall rule was never created. No errors appeared in the alert action's own log.
+
+**Root Cause #1 — Invalid configuration key:**
+Checking the Splunk startup log revealed the actual problem, which had been silently breaking the app since it was built:
+
+`script` is not a valid key for a modular alert action (`is_custom = 1`). The correct key is `alert.execute.cmd`. Because Splunk silently rejected the invalid line at startup, the alert action was never properly registered, even though the app appeared to load fine (`splunk display app pfsense_blocker` returned successfully).
+
+**Fix:**
+```ini
+# Before (invalid)
+script = alert_actions.py
+
+# After (correct)
+alert.execute.cmd = alert_actions.py
+```
+
+**Root Cause #2 — Legacy vs. JSON payload mismatch:**
+With the config key fixed, the action still didn't execute correctly. `alert_actions.conf` specified `payload_format = json`, which tells Splunk to pass alert data as a JSON blob on stdin. However, `alert_actions.py` was originally written for the legacy "Run a Script" convention, reading results via the `SPLUNK_ARG_8` environment variable — which is only populated when `is_custom = 0`. With `is_custom = 1` and `payload_format = json` set, that environment variable was never populated, so the script silently read `None` and exited without doing anything.
+
+**Fix:**
+Rewrote `alert_actions.py` to read the JSON payload from stdin, and to correctly decompress the gzipped CSV results file (modular alert results are gzip-compressed, unlike the legacy plain-text results file):
+
+```python
+payload = json.loads(sys.stdin.read())
+results_file = payload.get("results_file")
+
+with gzip.open(results_file, "rt") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        ip = row.get("attacker_ip")
+        ...
+```
+
+**Verification:**
+After both fixes, restarting Splunk and re-triggering the alert produced this in `alert_action.log`:
+
+`script` is not a valid key for a modular alert action (`is_custom = 1`). The correct key is `alert.execute.cmd`. Because Splunk silently rejected the invalid line at startup, the alert action was never properly registered, even though the app appeared to load fine (`splunk display app pfsense_blocker` returned successfully).
+
+**Fix:**
+```ini
+# Before (invalid)
+script = alert_actions.py
+
+# After (correct)
+alert.execute.cmd = alert_actions.py
+```
+
+**Root Cause #2 — Legacy vs. JSON payload mismatch:**
+With the config key fixed, the action still didn't execute correctly. `alert_actions.conf` specified `payload_format = json`, which tells Splunk to pass alert data as a JSON blob on stdin. However, `alert_actions.py` was originally written for the legacy "Run a Script" convention, reading results via the `SPLUNK_ARG_8` environment variable — which is only populated when `is_custom = 0`. With `is_custom = 1` and `payload_format = json` set, that environment variable was never populated, so the script silently read `None` and exited without doing anything.
+
+**Fix:**
+Rewrote `alert_actions.py` to read the JSON payload from stdin, and to correctly decompress the gzipped CSV results file (modular alert results are gzip-compressed, unlike the legacy plain-text results file):
+
+```python
+payload = json.loads(sys.stdin.read())
+results_file = payload.get("results_file")
+
+with gzip.open(results_file, "rt") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        ip = row.get("attacker_ip")
+        ...
+```
+
+**Verification:**
+After both fixes, restarting Splunk and re-triggering the alert produced this in `alert_action.log`:
+
+confirming the script correctly parsed the alert results and passed the attacker's IP through to `block_ip.py`.
+
+<img width="600" alt="alert_action.log showing successful payload and IP block" src="PASTE_IMAGE_URL_HERE" />
+
+---
+
+### 7.2 Email Notifications Stopped After the First Send
+
+**Symptom:**
+The email action fired successfully exactly once, then never sent again on subsequent alert triggers — with no indication in the Splunk UI of why.
+
+**Diagnosis:**
+Checking `splunkd.log` revealed the real error:
